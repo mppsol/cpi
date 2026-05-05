@@ -8,9 +8,16 @@
 // declare_id!() below.
 
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::instructions::load_instruction_at_checked;
 use anchor_spl::associated_token::AssociatedToken;
+
+// Ed25519 native precompile program ID. Hardcoded because `ed25519_program`
+// isn't re-exported in all solana-program versions.
+pub const ED25519_PROGRAM_ID: Pubkey =
+    pubkey!("Ed25519SigVerify111111111111111111111111111");
 use anchor_spl::token_interface::{
-    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
+    close_account, transfer_checked, CloseAccount, Mint, TokenAccount, TokenInterface,
+    TransferChecked,
 };
 
 declare_id!("B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi");
@@ -34,6 +41,10 @@ pub const MAX_BATCH_SIZE: usize = 32;
 // Grace window after `Revoke` before `Close` is permitted, so pending
 // debits can still settle.
 pub const REVOKE_GRACE_SECS: i64 = 24 * 60 * 60; // 24h
+
+// Ed25519 precompile data layout. See spec/session.md §6.
+pub const ED25519_HEADER_SIZE: usize = 2;       // num_signatures + padding
+pub const ED25519_SIG_OFFSETS_SIZE: usize = 14; // 7 u16 fields per sig
 
 // ============================================================================
 // Account state
@@ -153,100 +164,116 @@ pub mod mppsol_session {
     // Settles a batch of debit messages. The companion instruction in this
     // tx MUST be the Ed25519 precompile (program id
     // Ed25519SigVerify111111111111111111111111111) verifying every debit's
-    // signature. This handler reads the Sysvar: Instructions and binds
-    // the precompile data to the supplied debits.
-    //
-    // STATUS: skeleton. The precompile-binding logic is deferred to v0.1.1;
-    // see spec/session.md §6 for the required pattern.
+    // signature against the session's authorized_signer. See
+    // spec/session.md §6.
     pub fn settle(ctx: Context<Settle>, args: SettleArgs) -> Result<()> {
+        let session_state = ctx.accounts.session.state;
         require!(
-            ctx.accounts.session.state == SessionState::Active as u8
-                || ctx.accounts.session.state == SessionState::Revoked as u8,
+            session_state == SessionState::Active as u8
+                || session_state == SessionState::Revoked as u8,
             SessionError::NotActive,
         );
         require!(
             !args.debits.is_empty() && args.debits.len() <= MAX_BATCH_SIZE,
             SessionError::BadBatchSize,
         );
+        require!(
+            args.signatures.len() == args.debits.len(),
+            SessionError::BadBatchSize,
+        );
 
-        // TODO(v0.1.1): read Sysvar: Instructions, locate the Ed25519
-        // precompile companion ix, validate that for each debit:
-        //   - precompile message bytes == debit canonical encoding
-        //   - precompile pubkey == session.authorized_signer
-        //   - precompile signature == args.signatures[i]
-        //
-        // For now, return a clear "unimplemented" error so the program
-        // surface is correct but no settlements actually clear yet.
-        return err!(SessionError::MissingPrecompile);
+        // Encode each debit canonically (104 bytes). These are the messages
+        // we expect the Ed25519 precompile to have verified.
+        let messages: Vec<Vec<u8>> = args
+            .debits
+            .iter()
+            .map(|d| {
+                let mut buf = Vec::with_capacity(104);
+                buf.extend_from_slice(&d.session);
+                buf.extend_from_slice(&d.nonce);
+                buf.extend_from_slice(&d.amount.to_le_bytes());
+                buf.extend_from_slice(&d.expiry.to_le_bytes());
+                buf.extend_from_slice(&d.sequence.to_le_bytes());
+                buf.extend_from_slice(&d.domain_sep);
+                buf
+            })
+            .collect();
 
-        // The block below is the post-verification logic, kept as a
-        // reference for the v0.1.1 implementation.
-        #[allow(unreachable_code)]
-        {
-            let session = &mut ctx.accounts.session;
-            let mut cumulative: u64 = 0;
-            let mut max_seq = session.last_seen_sequence;
-            let now = Clock::get()?.unix_timestamp;
+        let authorized_signer_bytes = ctx.accounts.session.authorized_signer.to_bytes();
+        verify_ed25519_precompile_batch(
+            &ctx.accounts.instructions_sysvar,
+            &authorized_signer_bytes,
+            &messages,
+            &args.signatures,
+        )?;
 
-            for debit in &args.debits {
-                require!(
-                    debit.session == session.key().to_bytes(),
-                    SessionError::SessionMismatch,
-                );
-                require!(
-                    debit.domain_sep == DEBIT_DOMAIN_SEP,
-                    SessionError::BadDomainSeparator,
-                );
-                require!(debit.sequence > max_seq, SessionError::SequenceReused);
-                require!(debit.expiry >= now, SessionError::DebitExpired);
+        // Verify debit fields after Ed25519 binding succeeds.
+        let session_key = ctx.accounts.session.key();
+        let session = &mut ctx.accounts.session;
+        let mut cumulative: u64 = 0;
+        let mut max_seq = session.last_seen_sequence;
+        let now = Clock::get()?.unix_timestamp;
 
-                cumulative = cumulative
-                    .checked_add(debit.amount)
-                    .ok_or(error!(SessionError::CapExceeded))?;
-                require!(
-                    cumulative <= session.remaining_cap,
-                    SessionError::CapExceeded,
-                );
+        for debit in &args.debits {
+            require!(
+                debit.session == session_key.to_bytes(),
+                SessionError::SessionMismatch,
+            );
+            require!(
+                debit.domain_sep == DEBIT_DOMAIN_SEP,
+                SessionError::BadDomainSeparator,
+            );
+            require!(debit.sequence > max_seq, SessionError::SequenceReused);
+            require!(debit.expiry >= now, SessionError::DebitExpired);
 
-                if debit.sequence > max_seq {
-                    max_seq = debit.sequence;
-                }
-            }
-
-            // Transfer cumulative amount from escrow → server token account.
-            let session_key = session.key();
-            let mint_key = ctx.accounts.mint.key();
-            let bump = session.bump;
-            let signer_seeds: &[&[&[u8]]] = &[&[
-                SESSION_SEED,
-                session_key.as_ref(),
-                mint_key.as_ref(),
-                &[bump],
-            ]];
-
-            transfer_checked(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    TransferChecked {
-                        from: ctx.accounts.escrow.to_account_info(),
-                        to: ctx.accounts.server_token_account.to_account_info(),
-                        mint: ctx.accounts.mint.to_account_info(),
-                        authority: session.to_account_info(),
-                    },
-                    signer_seeds,
-                ),
-                cumulative,
-                ctx.accounts.mint.decimals,
-            )?;
-
-            session.remaining_cap = session
-                .remaining_cap
-                .checked_sub(cumulative)
+            cumulative = cumulative
+                .checked_add(debit.amount)
                 .ok_or(error!(SessionError::CapExceeded))?;
-            session.last_seen_sequence = max_seq;
+            require!(
+                cumulative <= session.remaining_cap,
+                SessionError::CapExceeded,
+            );
 
-            Ok(())
+            if debit.sequence > max_seq {
+                max_seq = debit.sequence;
+            }
         }
+
+        // Transfer cumulative amount from escrow → server token account.
+        let owner_key = session.owner;
+        let server_key = session.server;
+        let session_id_bytes = session.session_id;
+        let bump = session.bump;
+        let signer_seeds: &[&[&[u8]]] = &[&[
+            SESSION_SEED,
+            owner_key.as_ref(),
+            server_key.as_ref(),
+            session_id_bytes.as_ref(),
+            &[bump],
+        ]];
+
+        transfer_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.escrow.to_account_info(),
+                    to: ctx.accounts.server_token_account.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    authority: session.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            cumulative,
+            ctx.accounts.mint.decimals,
+        )?;
+
+        session.remaining_cap = session
+            .remaining_cap
+            .checked_sub(cumulative)
+            .ok_or(error!(SessionError::CapExceeded))?;
+        session.last_seen_sequence = max_seq;
+
+        Ok(())
     }
 
     // ----- Topup --------------------------------------------------------
@@ -308,10 +335,9 @@ pub mod mppsol_session {
     // ----- Close --------------------------------------------------------
     //
     // Closes a Revoked session past the grace period, or an Active session
-    // past expiry. Returns escrow + rent to owner.
-    //
-    // STATUS: skeleton. Token-account close + rent return wiring deferred
-    // to v0.1.1.
+    // past expiry. Drains residual escrow + escrow ATA rent + session PDA
+    // rent back to owner. Anchor's `close = owner` constraint on session
+    // handles the PDA close + rent refund.
     pub fn close(ctx: Context<Close>) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let session = &ctx.accounts.session;
@@ -325,11 +351,134 @@ pub mod mppsol_session {
         };
         require!(permitted, SessionError::CloseNotPermitted);
 
-        // TODO(v0.1.1): drain escrow to owner_destination, close escrow ATA,
-        // close session PDA via Anchor `close = owner` constraint.
+        let owner_key = session.owner;
+        let server_key = session.server;
+        let session_id_bytes = session.session_id;
+        let bump = session.bump;
+        let signer_seeds: &[&[&[u8]]] = &[&[
+            SESSION_SEED,
+            owner_key.as_ref(),
+            server_key.as_ref(),
+            session_id_bytes.as_ref(),
+            &[bump],
+        ]];
 
+        // Drain remaining escrow → owner_destination.
+        let escrow_balance = ctx.accounts.escrow.amount;
+        if escrow_balance > 0 {
+            transfer_checked(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.escrow.to_account_info(),
+                        to: ctx.accounts.owner_destination.to_account_info(),
+                        mint: ctx.accounts.mint.to_account_info(),
+                        authority: ctx.accounts.session.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                escrow_balance,
+                ctx.accounts.mint.decimals,
+            )?;
+        }
+
+        // Close the escrow token account, returning rent to owner.
+        close_account(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            CloseAccount {
+                account: ctx.accounts.escrow.to_account_info(),
+                destination: ctx.accounts.owner.to_account_info(),
+                authority: ctx.accounts.session.to_account_info(),
+            },
+            signer_seeds,
+        ))?;
+
+        // Session PDA itself is closed by the `close = owner` constraint
+        // on the session account in the Close context struct.
         Ok(())
     }
+}
+
+// ============================================================================
+// Ed25519 precompile verification helper (used by Settle and re-exported
+// for use by mppsol_cpi). See spec/session.md §6.
+// ============================================================================
+
+pub fn verify_ed25519_precompile_batch(
+    instructions_sysvar: &AccountInfo,
+    expected_pubkey: &[u8; 32],
+    messages: &[Vec<u8>],
+    signatures: &[[u8; 64]],
+) -> Result<()> {
+    let n = messages.len();
+    require!(n > 0, SessionError::BadBatchSize);
+    require!(signatures.len() == n, SessionError::BadBatchSize);
+
+    // Find the Ed25519 precompile instruction in this transaction.
+    let mut idx: u16 = 0;
+    let precompile_ix = loop {
+        if idx > 64 {
+            return err!(SessionError::MissingPrecompile);
+        }
+        match load_instruction_at_checked(idx as usize, instructions_sysvar) {
+            Ok(ix) => {
+                if ix.program_id == ED25519_PROGRAM_ID {
+                    break ix;
+                }
+                idx += 1;
+            }
+            Err(_) => return err!(SessionError::MissingPrecompile),
+        }
+    };
+
+    let data = &precompile_ix.data;
+    require!(
+        data.len() >= ED25519_HEADER_SIZE,
+        SessionError::MissingPrecompile,
+    );
+    require!(data[0] as usize == n, SessionError::MissingPrecompile);
+    require!(
+        data.len() >= ED25519_HEADER_SIZE + n * ED25519_SIG_OFFSETS_SIZE,
+        SessionError::MissingPrecompile,
+    );
+
+    for i in 0..n {
+        let entry_start = ED25519_HEADER_SIZE + i * ED25519_SIG_OFFSETS_SIZE;
+        let entry = &data[entry_start..entry_start + ED25519_SIG_OFFSETS_SIZE];
+
+        let sig_offset = u16::from_le_bytes([entry[0], entry[1]]) as usize;
+        let pk_offset = u16::from_le_bytes([entry[4], entry[5]]) as usize;
+        let msg_offset = u16::from_le_bytes([entry[8], entry[9]]) as usize;
+        let msg_size = u16::from_le_bytes([entry[10], entry[11]]) as usize;
+
+        require!(
+            pk_offset.checked_add(32).map_or(false, |e| e <= data.len()),
+            SessionError::MissingPrecompile,
+        );
+        require!(
+            sig_offset.checked_add(64).map_or(false, |e| e <= data.len()),
+            SessionError::MissingPrecompile,
+        );
+        require!(
+            msg_offset.checked_add(msg_size).map_or(false, |e| e <= data.len()),
+            SessionError::MissingPrecompile,
+        );
+
+        require!(
+            &data[pk_offset..pk_offset + 32] == expected_pubkey,
+            SessionError::InvalidSignature,
+        );
+        require!(
+            &data[sig_offset..sig_offset + 64] == signatures[i].as_slice(),
+            SessionError::InvalidSignature,
+        );
+        require!(
+            &data[msg_offset..msg_offset + msg_size] == messages[i].as_slice(),
+            SessionError::InvalidSignature,
+        );
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -503,8 +652,31 @@ pub struct Close<'info> {
 
     #[account(
         mut,
-        // close = owner constraint deferred until v0.1.1 implements
-        // escrow draining, to avoid leaving funds locked.
+        close = owner,
+        seeds = [
+            SESSION_SEED,
+            session.owner.as_ref(),
+            session.server.as_ref(),
+            session.session_id.as_ref(),
+        ],
+        bump = session.bump,
     )]
     pub session: Account<'info, Session>,
+
+    pub mint: InterfaceAccount<'info, Mint>,
+
+    #[account(
+        mut,
+        constraint = escrow.key() == session.escrow,
+    )]
+    pub escrow: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_destination.mint == mint.key(),
+        constraint = owner_destination.owner == owner.key(),
+    )]
+    pub owner_destination: InterfaceAccount<'info, TokenAccount>,
+
+    pub token_program: Interface<'info, TokenInterface>,
 }

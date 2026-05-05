@@ -10,10 +10,11 @@
 // declare_id!() below.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::set_return_data;
+use anchor_lang::solana_program::program::{get_return_data, set_return_data};
 use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
+use mppsol_session::verify_ed25519_precompile_batch;
 
 declare_id!("624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j");
 
@@ -136,40 +137,81 @@ pub mod mppsol_cpi {
     //
     // Read-only. Confirms that:
     //   1. A prior Pay or SettleViaSession in this tx wrote return data
-    //      whose nonce + request_hash + recipient match the args.
+    //      whose nonce + request_hash match the args.
     //   2. The Ed25519 precompile companion ix verified `server_pubkey`'s
-    //      signature over (nonce || request_hash || result_hash) with the
-    //      MPP.SOL/RESULT01 domain separator.
+    //      signature over the canonical message
+    //      (nonce || request_hash || result_hash || RESULT_DOMAIN_SEP).
     //
     // On failure the caller's tx reverts. This is the killer instruction
     // for atomic pay-and-consume composition.
-    //
-    // STATUS: skeleton. Sysvar:Instructions parsing deferred to v0.1.1.
     pub fn verify_paid_result(
-        _ctx: Context<VerifyPaidResult>,
-        _args: VerifyPaidResultArgs,
+        ctx: Context<VerifyPaidResult>,
+        args: VerifyPaidResultArgs,
     ) -> Result<()> {
-        // TODO(v0.1.1):
-        //   1. get_return_data() from the prior ix (or read receipt account).
-        //   2. Decode discriminator + fields; check nonce + request_hash +
-        //      recipient match the supplied server_pubkey's token account.
-        //   3. Read Sysvar: Instructions; locate the Ed25519 precompile
-        //      companion ix; verify its (pubkey, message, signature) tuple
-        //      matches (server_pubkey, nonce||request_hash||result_hash,
-        //      args.server_signature).
-        return err!(CpiError::ReceiptNotFound);
+        // 1. Read return data set by a prior Pay/SettleViaSession in this tx.
+        let (return_program_id, return_data) =
+            get_return_data().ok_or(error!(CpiError::ReceiptNotFound))?;
+        require!(return_program_id == crate::ID, CpiError::ReceiptNotFound);
+        require!(
+            return_data.len() == RETURN_DATA_BYTE_LENGTH,
+            CpiError::ReceiptNotFound,
+        );
+
+        // 2. Discriminator must be PAY1 or SES1.
+        let discriminator = &return_data[0..4];
+        require!(
+            discriminator == PAY_RETURN_DISCRIMINATOR
+                || discriminator == SESSION_RETURN_DISCRIMINATOR,
+            CpiError::ReceiptNotFound,
+        );
+
+        // 3. Nonce + request_hash must match.
+        let receipt_nonce = &return_data[4..36];
+        let receipt_request_hash = &return_data[36..68];
+        require!(receipt_nonce == args.nonce, CpiError::ReceiptMismatch);
+        require!(
+            receipt_request_hash == args.request_hash,
+            CpiError::ReceiptMismatch,
+        );
+
+        // 4. Build canonical result message (112 bytes) and verify Ed25519.
+        let mut message = Vec::with_capacity(112);
+        message.extend_from_slice(&args.nonce);
+        message.extend_from_slice(&args.request_hash);
+        message.extend_from_slice(&args.result_hash);
+        message.extend_from_slice(&RESULT_DOMAIN_SEP);
+
+        verify_ed25519_precompile_batch(
+            &ctx.accounts.instructions_sysvar,
+            &args.server_pubkey.to_bytes(),
+            &[message],
+            &[args.server_signature],
+        )
+        .map_err(|_| error!(CpiError::InvalidResultSignature))?;
+
+        Ok(())
     }
 
     // ----- GetReceipt --------------------------------------------------
     //
-    // Re-emits the receipt for a payment made earlier in the same tx.
-    // Useful when the caller is multiple CPIs deep and the original
-    // return data has been overwritten.
-    //
-    // STATUS: skeleton.
-    pub fn get_receipt(_ctx: Context<GetReceipt>, _nonce: [u8; 32]) -> Result<()> {
-        // TODO(v0.1.1): look up receipt account by nonce, set_return_data.
-        return err!(CpiError::ReceiptNotFound);
+    // Asserts a return-data receipt for the given nonce exists in this tx
+    // and re-emits it via set_return_data. Useful when CPI calls have
+    // overwritten earlier return data.
+    pub fn get_receipt(_ctx: Context<GetReceipt>, nonce: [u8; 32]) -> Result<()> {
+        let (return_program_id, return_data) =
+            get_return_data().ok_or(error!(CpiError::ReceiptNotFound))?;
+        require!(return_program_id == crate::ID, CpiError::ReceiptNotFound);
+        require!(
+            return_data.len() == RETURN_DATA_BYTE_LENGTH,
+            CpiError::ReceiptNotFound,
+        );
+        let receipt_nonce = &return_data[4..36];
+        require!(receipt_nonce == nonce, CpiError::ReceiptMismatch);
+
+        // Re-emit (no-op if already set this ix; explicit for callers
+        // multiple CPIs deep).
+        set_return_data(&return_data);
+        Ok(())
     }
 }
 

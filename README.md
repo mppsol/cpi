@@ -16,32 +16,38 @@ off-chain-signed message verification cheap on-chain.
 
 ## Status
 
-**v0.1 draft. Not yet built, not yet deployed, not yet audited.**
+**v0.1 draft. Builds clean. Not yet deployed. Not yet audited.**
 
-> ⚠️ **No on-chain functionality is currently usable.** The Rust source
-> compiles against the host target (verified with `cargo build`) but
-> `anchor build` (the BPF/SBF target) is blocked on an upstream Solana
-> toolchain issue — see [Known toolchain blocker](#known-toolchain-blocker-may-2026)
-> below. Once unblocked: finish stubbed instructions → audit → deploy.
+> ⚠️ **The on-chain programs build to BPF artifacts but several
+> instructions are still stubbed.** Direct payment via `mppsol_cpi::pay`
+> is fully implemented; settlement and verification paths are
+> in-progress. Audit required before mainnet deploy.
 
-What's implemented in v0.1 source (awaiting build):
+Build artifacts (after `anchor build`):
+
+```
+target/deploy/
+├── mppsol_session.so   ~290 KB
+└── mppsol_cpi.so       ~240 KB
+```
+
+What's implemented in v0.1 source:
 
 | Instruction | Status |
 | --- | --- |
-| `mppsol_session::open` | Full implementation (PDA init, escrow ATA init, token transfer) |
-| `mppsol_session::topup` | Full implementation |
-| `mppsol_session::revoke` | Full implementation (owner or server) |
-| `mppsol_session::settle` | Skeleton — Ed25519 precompile binding deferred to v0.1.1 |
-| `mppsol_session::close` | Skeleton — escrow drain logic deferred to v0.1.1 |
-| `mppsol_cpi::pay` | Full implementation (transfer + log + return data) |
-| `mppsol_cpi::settle_via_session` | Skeleton — pending `mppsol_session::settle` |
-| `mppsol_cpi::verify_paid_result` | Skeleton — sysvar:instructions parsing deferred |
-| `mppsol_cpi::get_receipt` | Skeleton |
+| `mppsol_session::open` | ✅ Full (PDA init, escrow ATA init, token transfer) |
+| `mppsol_session::topup` | ✅ Full |
+| `mppsol_session::revoke` | ✅ Full (owner or server) |
+| `mppsol_session::settle` | ✅ Full (Ed25519 precompile batch verify + transfer + state update) |
+| `mppsol_session::close` | ✅ Full (drain escrow → owner_destination, close ATA, close PDA) |
+| `mppsol_cpi::pay` | ✅ Full (transfer + log + return data) |
+| `mppsol_cpi::verify_paid_result` | ✅ Full (return data lookup + Ed25519 result verify) |
+| `mppsol_cpi::get_receipt` | ✅ Full (return data assertion + re-emit) |
+| `mppsol_cpi::settle_via_session` | ⚠️ Stub — CPI wrapper around `mppsol_session::settle`, deferred |
 
-The `Session` and `Pay` flows are real and reviewable; the verification
-paths are explicitly stubbed and return `MissingPrecompile` /
-`ReceiptNotFound` errors so consumers can't accidentally rely on them
-yet.
+8 of 9 instructions are fully implemented. The remaining stub
+(`settle_via_session`) returns `MissingPrecompile` so callers can't
+accidentally rely on it. Audit required before mainnet deploy.
 
 ## Architecture
 
@@ -89,52 +95,19 @@ solana-keygen new -o target/deploy/mppsol_cpi-keypair.json --force
 anchor keys sync
 ```
 
-### Known toolchain blocker (May 2026)
+### Toolchain notes (resolved)
 
-`anchor build` is blocked on every Solana toolchain available today.
-Multiple transitive deps (`constant_time_eq 0.4.2`, `indexmap 2.14.0`,
-`toml_datetime 1.1.1`, ...) now require the `edition2024` cargo feature
-that was stabilized in cargo 1.85. Solana platform-tools versions ship
-older cargo:
-
-| Solana platform-tools | rustc | cargo | Status |
-| --- | --- | --- | --- |
-| v1.41 (Solana 1.18.26) | 1.75 | 1.75 | Blocked |
-| v1.44 (Solana 2.2.1) | 1.79 | 1.79 | Blocked |
-| v1.48 (Solana 2.2.20) | 1.84 | 1.84 | Blocked |
-| v1.49+ (not released) | 1.85+ | 1.85+ | Will work |
-
-Updating the system Rust to 1.85 does **not** help, because Anchor's
-BPF build pipeline always uses Solana's bundled cargo, not the system
-one. This affects every Anchor project in May 2026, not specific to
-MPP.sol.
-
-#### Observed-working workaround
-
-The Rust code in this repo **does compile** with the host target using
-the system cargo (verified with `cargo build`). It's only the BPF
-target that's blocked, and only by transitive dep version skew, not by
-issues in the MPP.sol code itself.
+Earlier (May 2026) versions of this README claimed an upstream blocker
+on Solana platform-tools v1.49+. That was a misdiagnosis — v1.49 had
+shipped almost a year prior (June 2025), and Solana CLI 2.2.x simply
+bundled the older v1.48. **Upgrading to Solana CLI 3.1.14+ (which
+bundles platform-tools v1.52, rustc 1.89) resolves the build.** Plus
+adding `bs58 = "0.5"` as a direct dep in `mppsol-cpi/Cargo.toml`.
 
 ```sh
-cargo build --manifest-path programs/mppsol-session/Cargo.toml  # ✓ succeeds
-cargo build --manifest-path programs/mppsol-cpi/Cargo.toml       # ✓ succeeds
-anchor build                                                     # ✗ blocked
+agave-install init 3.1.14
+anchor build  # ✓ succeeds, produces both .so files
 ```
-
-#### Real workarounds, in order of preference
-
-1. **Wait for Solana platform-tools v1.49+.** Tracked in upstream
-   releases. Likely 1–2 weeks based on typical cadence.
-2. **Hand-construct a `Cargo.lock`** with every transitive dep pinned
-   to its last pre-edition2024 version. Tedious; ~10–15 pins required;
-   must be re-checked on every Cargo.toml change.
-3. **Switch to a non-Anchor framework** like Pinocchio (no proc macros,
-   uses raw `solana-program`). Larger refactor.
-
-The reference implementation in this repo will become buildable on the
-first official platform-tools v1.49 release without any source changes
-(only Cargo.lock will need a refresh).
 
 ## Domain separators
 
