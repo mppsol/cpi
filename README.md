@@ -60,23 +60,48 @@ caller program ──CPI──▶ mppsol_cpi ──CPI──▶ mppsol_session
                                 + Ed25519 precompile)
 ```
 
-## Build (when toolchain is set up)
+## Build
 
 Requires:
-- Rust 1.79+
-- Solana CLI 1.18+
-- Anchor CLI 0.30.1
+- Solana CLI 2.2+
+- Anchor CLI 0.32.1
 
 ```sh
-# Generate real program keypairs (placeholders in source must be replaced)
-anchor keys sync
-
 # Build BPF binaries
 anchor build
 
 # Run the test suite (TODO: tests)
 anchor test
 ```
+
+Program keypairs are committed under `target/deploy/`. Program IDs are
+already embedded in source and `Anchor.toml`. To regenerate:
+
+```sh
+solana-keygen new -o target/deploy/mppsol_session-keypair.json --force
+solana-keygen new -o target/deploy/mppsol_cpi-keypair.json --force
+anchor keys sync
+```
+
+### Known toolchain issue (May 2026)
+
+As of Solana platform-tools v1.48 (rustc 1.84.1, cargo 1.84.0), the
+transitive dependency `constant_time_eq 0.4.2` requires the unstable
+`edition2024` cargo feature (stabilized in cargo 1.85). The build will
+fail with:
+
+```
+error: feature `edition2024` is required
+  Caused by: parse manifest at constant_time_eq-0.4.2/Cargo.toml
+```
+
+This affects many Solana/Anchor projects in this window and is not
+specific to MPP.sol. Workarounds:
+
+1. Wait for Solana to bump platform-tools to v1.49+ (rustc 1.85+).
+2. Use Anchor 0.30.1 + Solana 1.18 (older, but stable combination).
+3. Pin `constant_time_eq = "=0.4.1"` via a git patch in workspace
+   `Cargo.toml` (SemVer-compatible patches require git source).
 
 ## Domain separators
 

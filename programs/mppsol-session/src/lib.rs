@@ -13,7 +13,7 @@ use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
 
-declare_id!("mpps1Sess1on11111111111111111111111111111111");
+declare_id!("B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi");
 
 // ============================================================================
 // Constants
