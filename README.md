@@ -16,19 +16,25 @@ off-chain-signed message verification cheap on-chain.
 
 ## Status
 
-**v0.1 draft. Builds clean. Not yet deployed. Not yet audited.**
+**v0.1 draft. Both programs deployed to Solana devnet.** Anchor test
+suite (5 passing, 1 skipped) validates the critical Ed25519 settle
+path end-to-end. Audit required before mainnet.
 
-> ⚠️ **The on-chain programs build to BPF artifacts but several
-> instructions are still stubbed.** Direct payment via `mppsol_cpi::pay`
-> is fully implemented; settlement and verification paths are
-> in-progress. Audit required before mainnet deploy.
+### Deployed program IDs (devnet)
 
-Build artifacts (after `anchor build`):
+| Program | Program ID |
+| --- | --- |
+| `mppsol_session` | [`B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi`](https://explorer.solana.com/address/B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi?cluster=devnet) |
+| `mppsol_cpi` | [`624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j`](https://explorer.solana.com/address/624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j?cluster=devnet) |
+
+IDLs are uploaded on-chain — fetch via `Program.fetchIdl(programId, provider)`.
+
+### Build artifacts
 
 ```
 target/deploy/
-├── mppsol_session.so   ~290 KB
-└── mppsol_cpi.so       ~240 KB
+├── mppsol_session.so   ~324 KB
+└── mppsol_cpi.so       ~261 KB
 ```
 
 What's implemented in v0.1 source:
