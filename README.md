@@ -16,9 +16,15 @@ off-chain-signed message verification cheap on-chain.
 
 ## Status
 
-**v0.1 draft. Not yet deployed. Not yet audited.**
+**v0.1 draft. Not yet built, not yet deployed, not yet audited.**
 
-What's implemented in v0.1:
+> ⚠️ **No on-chain functionality is currently usable.** The Rust source
+> compiles against the host target (verified with `cargo build`) but
+> `anchor build` (the BPF/SBF target) is blocked on an upstream Solana
+> toolchain issue — see [Known toolchain blocker](#known-toolchain-blocker-may-2026)
+> below. Once unblocked: finish stubbed instructions → audit → deploy.
+
+What's implemented in v0.1 source (awaiting build):
 
 | Instruction | Status |
 | --- | --- |
