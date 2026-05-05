@@ -3,6 +3,10 @@
   "version": "0.1.0-draft.1",
   "description": "MPP.sol — Solana on-chain programs (mppsol_session + mppsol_cpi). Anchor workspace; TypeScript bindings forthcoming.",
   "private": false,
+  "scripts": {
+    "lint:fix": "echo 'TODO'",
+    "test": "anchor test"
+  },
   "files": [
     "README.md",
     "LICENSE",
@@ -10,6 +14,21 @@
     "Cargo.toml",
     "programs/"
   ],
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.0",
+    "@noble/curves": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.3.0",
+    "@types/mocha": "^10.0.0",
+    "chai": "^4.3.4",
+    "mocha": "^10.0.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.5.0"
+  },
   "keywords": [
     "mpp",
     "machine-payments-protocol",

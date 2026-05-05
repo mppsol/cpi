@@ -32,7 +32,9 @@ pub const SESSION_RETURN_DISCRIMINATOR: [u8; 4] = *b"SES1";
 
 // Total bytes of the PayReturn / SessionSettleReturn structure when
 // serialized to return data. See spec/cpi.md §4.1.
-pub const RETURN_DATA_BYTE_LENGTH: usize = 140;
+// Layout: discriminator(4) + nonce(32) + request_hash(32) + amount(8) +
+//         recipient(32) + mint(32) + slot(8) = 148.
+pub const RETURN_DATA_BYTE_LENGTH: usize = 148;
 
 // ============================================================================
 // Errors
@@ -249,10 +251,11 @@ pub struct VerifyPaidResultArgs {
 
 #[derive(Accounts)]
 pub struct Pay<'info> {
-    /// Authority over the payer's token account. Often a Signer, but can
-    /// be a PDA when invoked via CPI from another program.
-    /// CHECK: validated implicitly by the SPL transfer.
-    pub payer_authority: AccountInfo<'info>,
+    /// Authority over the payer's token account.
+    /// Note: typed as Signer for v0.1 simplicity. PDA-callable variant
+    /// (for invocation via CPI from caller programs) deferred to v0.2 —
+    /// will need a separate `pay_via_cpi` ix that uses CpiContext::new_with_signer.
+    pub payer_authority: Signer<'info>,
 
     #[account(mut)]
     pub payer_token_account: InterfaceAccount<'info, TokenAccount>,
