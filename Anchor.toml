@@ -8,10 +8,12 @@ skip-lint = false
 [programs.localnet]
 mppsol_session = "B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi"
 mppsol_cpi = "624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j"
+test_consumer = "65ndFCiYYM3tznTg5Te1x8ALfVP7SxFEwvvUeANYy3Ex"
 
 [programs.devnet]
 mppsol_session = "B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi"
 mppsol_cpi = "624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j"
+test_consumer = "65ndFCiYYM3tznTg5Te1x8ALfVP7SxFEwvvUeANYy3Ex"
 
 [registry]
 url = "https://api.apr.dev"

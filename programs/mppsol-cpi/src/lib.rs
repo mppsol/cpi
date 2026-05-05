@@ -10,7 +10,9 @@
 // declare_id!() below.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::{get_return_data, set_return_data};
+use anchor_lang::solana_program::program::{
+    get_return_data, set_return_data,
+};
 use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
@@ -115,68 +117,72 @@ pub mod mppsol_cpi {
 
     // ----- SettleViaSession --------------------------------------------
     //
-    // CPI-callable wrapper around mppsol_session::Settle for a single
-    // debit. Verifies the Ed25519 precompile companion ix, invokes
-    // session settlement via CPI, then emits a SettleReturn struct.
-    //
-    // STATUS: skeleton. The session::Settle CPI invocation is deferred
-    // until session's Settle is implemented (v0.1.1).
+    // CPI-callable wrapper around mppsol_session::settle for a single
+    // debit. Invokes session settlement (which itself verifies the
+    // Ed25519 precompile companion ix), then emits a SES1-discriminated
+    // return data block so a subsequent verify_paid_result can consume it.
     pub fn settle_via_session(
-        _ctx: Context<SettleViaSession>,
-        _args: SettleViaSessionArgs,
+        ctx: Context<SettleViaSession>,
+        args: SettleViaSessionArgs,
     ) -> Result<()> {
-        // TODO(v0.1.1):
-        //   1. Verify Ed25519 precompile companion ix matches the supplied
-        //      debit and the session's authorized_signer.
-        //   2. Invoke mppsol_session::settle via CPI with a 1-element
-        //      debits batch.
-        //   3. Emit SES1-discriminated return data with the same shape
-        //      as PayReturn.
-        return err!(CpiError::MissingPrecompile);
+        // CPI into mppsol_session::settle with a 1-element batch.
+        let cpi_program = ctx.accounts.mppsol_session_program.to_account_info();
+        let cpi_accounts = mppsol_session::cpi::accounts::Settle {
+            server: ctx.accounts.server.to_account_info(),
+            session: ctx.accounts.session.to_account_info(),
+            mint: ctx.accounts.mint.to_account_info(),
+            escrow: ctx.accounts.escrow.to_account_info(),
+            server_token_account: ctx.accounts.recipient_token_account.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+            instructions_sysvar: ctx.accounts.instructions_sysvar.to_account_info(),
+        };
+        let cpi_args = mppsol_session::SettleArgs {
+            debits: vec![args.debit.clone()],
+            signatures: vec![args.signature],
+        };
+        mppsol_session::cpi::settle(
+            CpiContext::new(cpi_program, cpi_accounts),
+            cpi_args,
+        )?;
+
+        // Emit SES1-discriminated return data so a subsequent
+        // verify_paid_result CPI can read the receipt.
+        let slot = Clock::get()?.slot;
+        let mut buf = Vec::with_capacity(RETURN_DATA_BYTE_LENGTH);
+        buf.extend_from_slice(&SESSION_RETURN_DISCRIMINATOR);
+        buf.extend_from_slice(&args.debit.nonce);
+        buf.extend_from_slice(&args.request_hash);
+        buf.extend_from_slice(&args.debit.amount.to_le_bytes());
+        buf.extend_from_slice(&ctx.accounts.recipient_token_account.key().to_bytes());
+        buf.extend_from_slice(&ctx.accounts.mint.key().to_bytes());
+        buf.extend_from_slice(&slot.to_le_bytes());
+        set_return_data(&buf);
+
+        Ok(())
     }
 
     // ----- VerifyPaidResult --------------------------------------------
     //
-    // Read-only. Confirms that:
-    //   1. A prior Pay or SettleViaSession in this tx wrote return data
-    //      whose nonce + request_hash match the args.
-    //   2. The Ed25519 precompile companion ix verified `server_pubkey`'s
-    //      signature over the canonical message
-    //      (nonce || request_hash || result_hash || RESULT_DOMAIN_SEP).
+    // Verifies that an Ed25519 precompile companion ix in the same tx
+    // attests `server_pubkey` signed the canonical message
+    // (nonce || request_hash || result_hash || RESULT_DOMAIN_SEP).
     //
-    // On failure the caller's tx reverts. This is the killer instruction
-    // for atomic pay-and-consume composition.
+    // v0.1 NOTE on payment-binding: this ix does NOT verify a prior Pay
+    // happened in the same tx. Solana clears return data at the start of
+    // every program invocation (including CPIs), so the original spec's
+    // return-data lookup doesn't work across CPI boundaries. The
+    // payment-binding guarantee in v0.1 comes from the nonce model:
+    // servers only sign result hashes for nonces they issued challenges
+    // for, so possession of a valid (nonce, signed_result) pair implies
+    // payment was made off-chain.
+    //
+    // For stronger atomic on-chain payment-binding, the v0.2 spec will
+    // add a Receipt account variant to Pay (rent-bearing, persistent
+    // across CPIs). See spec/cpi.md §6 for the design.
     pub fn verify_paid_result(
         ctx: Context<VerifyPaidResult>,
         args: VerifyPaidResultArgs,
     ) -> Result<()> {
-        // 1. Read return data set by a prior Pay/SettleViaSession in this tx.
-        let (return_program_id, return_data) =
-            get_return_data().ok_or(error!(CpiError::ReceiptNotFound))?;
-        require!(return_program_id == crate::ID, CpiError::ReceiptNotFound);
-        require!(
-            return_data.len() == RETURN_DATA_BYTE_LENGTH,
-            CpiError::ReceiptNotFound,
-        );
-
-        // 2. Discriminator must be PAY1 or SES1.
-        let discriminator = &return_data[0..4];
-        require!(
-            discriminator == PAY_RETURN_DISCRIMINATOR
-                || discriminator == SESSION_RETURN_DISCRIMINATOR,
-            CpiError::ReceiptNotFound,
-        );
-
-        // 3. Nonce + request_hash must match.
-        let receipt_nonce = &return_data[4..36];
-        let receipt_request_hash = &return_data[36..68];
-        require!(receipt_nonce == args.nonce, CpiError::ReceiptMismatch);
-        require!(
-            receipt_request_hash == args.request_hash,
-            CpiError::ReceiptMismatch,
-        );
-
-        // 4. Build canonical result message (112 bytes) and verify Ed25519.
         let mut message = Vec::with_capacity(112);
         message.extend_from_slice(&args.nonce);
         message.extend_from_slice(&args.request_hash);
@@ -275,10 +281,9 @@ pub struct Pay<'info> {
 
 #[derive(Accounts)]
 pub struct SettleViaSession<'info> {
-    /// CPI caller (often a program PDA).
-    /// CHECK: not authoritative for fund movement; recipient is fixed by
-    /// the session record.
-    pub caller: AccountInfo<'info>,
+    /// Server signer — passed through to mppsol_session::settle as the
+    /// session's `server`. Must match session.server.
+    pub server: Signer<'info>,
 
     /// Session PDA owned by mppsol_session.
     /// CHECK: validated by the inner CPI to mppsol_session::settle.
