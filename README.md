@@ -48,7 +48,7 @@ What's implemented in v0.1 source:
 | `mppsol_session::settle` | ✅ Full (Ed25519 precompile batch verify + transfer + state update) |
 | `mppsol_session::close` | ✅ Full (drain escrow → owner_destination, close ATA, close PDA) |
 | `mppsol_cpi::pay` | ✅ Full (transfer + log + return data) |
-| `mppsol_cpi::verify_paid_result` | ✅ Full (Ed25519 result-hash verify; v0.1 simplification — see below) |
+| `mppsol_cpi::verify_paid_result` | ✅ Full (Ed25519 result-hash verify; off-chain nonce-binding flow — for atomic on-chain binding use `verify_paid_result_with_receipt` below) |
 | `mppsol_cpi::get_receipt` | ✅ Full (return-data assertion + re-emit, same call stack only) |
 | `mppsol_cpi::settle_via_session` | ✅ Full (CPI to `mppsol_session::settle` + SES1 return data) |
 | `mppsol_cpi::pay_with_receipt` | ✅ **v0.1.1** — Pay + writes a Receipt PDA (atomic on-chain payment-binding, persists across CPIs and tx boundaries) |
