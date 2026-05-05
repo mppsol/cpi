@@ -26,7 +26,7 @@ pub const ESCROW_SEED: &[u8] = b"escrow";
 pub const DEBIT_DOMAIN_SEP: [u8; 16] = *b"MPP.SOL/DEBIT001";
 
 // Canonical serialized debit message length.
-pub const DEBIT_BYTE_LENGTH: usize = 122;
+pub const DEBIT_BYTE_LENGTH: usize = 104;
 
 // Max debits in a single batched Settle. Bounded by Solana CU budget.
 pub const MAX_BATCH_SIZE: usize = 32;
@@ -81,7 +81,7 @@ pub enum SessionError {
     Expired,
     #[msg("debit batch is empty or too large")]
     BadBatchSize,
-    #[msg("debit byte length is not 122")]
+    #[msg("debit byte length is not 104")]
     BadDebitLength,
     #[msg("debit domain separator is invalid")]
     BadDomainSeparator,
@@ -352,7 +352,7 @@ pub struct SettleArgs {
     pub signatures: Vec<[u8; 64]>,
 }
 
-// Canonical 122-byte off-chain debit message. Layout MUST match
+// Canonical 104-byte off-chain debit message. Layout MUST match
 // @mppsol/core's encodeDebit and spec/wire.md §4.2.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Debit {
