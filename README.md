@@ -83,25 +83,52 @@ solana-keygen new -o target/deploy/mppsol_cpi-keypair.json --force
 anchor keys sync
 ```
 
-### Known toolchain issue (May 2026)
+### Known toolchain blocker (May 2026)
 
-As of Solana platform-tools v1.48 (rustc 1.84.1, cargo 1.84.0), the
-transitive dependency `constant_time_eq 0.4.2` requires the unstable
-`edition2024` cargo feature (stabilized in cargo 1.85). The build will
-fail with:
+`anchor build` is blocked on every Solana toolchain available today.
+Multiple transitive deps (`constant_time_eq 0.4.2`, `indexmap 2.14.0`,
+`toml_datetime 1.1.1`, ...) now require the `edition2024` cargo feature
+that was stabilized in cargo 1.85. Solana platform-tools versions ship
+older cargo:
 
+| Solana platform-tools | rustc | cargo | Status |
+| --- | --- | --- | --- |
+| v1.41 (Solana 1.18.26) | 1.75 | 1.75 | Blocked |
+| v1.44 (Solana 2.2.1) | 1.79 | 1.79 | Blocked |
+| v1.48 (Solana 2.2.20) | 1.84 | 1.84 | Blocked |
+| v1.49+ (not released) | 1.85+ | 1.85+ | Will work |
+
+Updating the system Rust to 1.85 does **not** help, because Anchor's
+BPF build pipeline always uses Solana's bundled cargo, not the system
+one. This affects every Anchor project in May 2026, not specific to
+MPP.sol.
+
+#### Observed-working workaround
+
+The Rust code in this repo **does compile** with the host target using
+the system cargo (verified with `cargo build`). It's only the BPF
+target that's blocked, and only by transitive dep version skew, not by
+issues in the MPP.sol code itself.
+
+```sh
+cargo build --manifest-path programs/mppsol-session/Cargo.toml  # ✓ succeeds
+cargo build --manifest-path programs/mppsol-cpi/Cargo.toml       # ✓ succeeds
+anchor build                                                     # ✗ blocked
 ```
-error: feature `edition2024` is required
-  Caused by: parse manifest at constant_time_eq-0.4.2/Cargo.toml
-```
 
-This affects many Solana/Anchor projects in this window and is not
-specific to MPP.sol. Workarounds:
+#### Real workarounds, in order of preference
 
-1. Wait for Solana to bump platform-tools to v1.49+ (rustc 1.85+).
-2. Use Anchor 0.30.1 + Solana 1.18 (older, but stable combination).
-3. Pin `constant_time_eq = "=0.4.1"` via a git patch in workspace
-   `Cargo.toml` (SemVer-compatible patches require git source).
+1. **Wait for Solana platform-tools v1.49+.** Tracked in upstream
+   releases. Likely 1–2 weeks based on typical cadence.
+2. **Hand-construct a `Cargo.lock`** with every transitive dep pinned
+   to its last pre-edition2024 version. Tedious; ~10–15 pins required;
+   must be re-checked on every Cargo.toml change.
+3. **Switch to a non-Anchor framework** like Pinocchio (no proc macros,
+   uses raw `solana-program`). Larger refactor.
+
+The reference implementation in this repo will become buildable on the
+first official platform-tools v1.49 release without any source changes
+(only Cargo.lock will need a refresh).
 
 ## Domain separators
 
