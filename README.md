@@ -51,8 +51,11 @@ What's implemented in v0.1 source:
 | `mppsol_cpi::verify_paid_result` | ✅ Full (Ed25519 result-hash verify; v0.1 simplification — see below) |
 | `mppsol_cpi::get_receipt` | ✅ Full (return-data assertion + re-emit, same call stack only) |
 | `mppsol_cpi::settle_via_session` | ✅ Full (CPI to `mppsol_session::settle` + SES1 return data) |
+| `mppsol_cpi::pay_with_receipt` | ✅ **v0.1.1** — Pay + writes a Receipt PDA (atomic on-chain payment-binding, persists across CPIs and tx boundaries) |
+| `mppsol_cpi::verify_paid_result_with_receipt` | ✅ **v0.1.1** — Ed25519 verify + on-chain Receipt PDA lookup (replaces v0.2 design — shipped early) |
+| `mppsol_cpi::claim_receipt` | ✅ **v0.1.1** — payer reclaims rent from a consumed Receipt |
 
-All 9 instructions are implemented. Anchor test suite: 7/7 passing on
+All 12 instructions are implemented. Anchor test suite: 7/7 passing on
 localnet. Audit required before mainnet.
 
 #### v0.1 verify_paid_result simplification

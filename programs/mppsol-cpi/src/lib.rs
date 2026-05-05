@@ -32,6 +32,10 @@ pub const RESULT_DOMAIN_SEP: [u8; 16] = *b"MPP.SOL/RESULT01";
 pub const PAY_RETURN_DISCRIMINATOR: [u8; 4] = *b"PAY1";
 pub const SESSION_RETURN_DISCRIMINATOR: [u8; 4] = *b"SES1";
 
+// Receipt PDA seed. See spec/cpi.md §6 (v0.2 receipt-account variant,
+// shipped in v0.1.1).
+pub const RECEIPT_SEED: &[u8] = b"receipt";
+
 // Total bytes of the PayReturn / SessionSettleReturn structure when
 // serialized to return data. See spec/cpi.md §4.1.
 // Layout: discriminator(4) + nonce(32) + request_hash(32) + amount(8) +
@@ -56,6 +60,36 @@ pub enum CpiError {
     ReceiptNotFound,
     #[msg("receipt fields do not match VerifyPaidResult arguments")]
     ReceiptMismatch,
+    #[msg("receipt has already been claimed")]
+    ReceiptAlreadyClaimed,
+    #[msg("receipt belongs to a different payer")]
+    ReceiptPayerMismatch,
+}
+
+// ============================================================================
+// State accounts
+// ============================================================================
+
+// On-chain receipt for a Pay or SettleViaSession. v0.2 variant of the
+// return-data design — persists across CPIs and tx boundaries, so a
+// later VerifyPaidResult (in the same or a different tx) can confirm
+// payment-binding atomically. Closed via claim_receipt to recover rent.
+//
+// PDA seeds: [RECEIPT_SEED, payer.as_ref(), nonce.as_ref()]
+#[account]
+#[derive(InitSpace)]
+pub struct Receipt {
+    pub discriminator: [u8; 4],
+    pub nonce: [u8; 32],
+    pub request_hash: [u8; 32],
+    pub amount: u64,
+    pub recipient: Pubkey,
+    pub mint: Pubkey,
+    pub slot: u64,
+    pub payer: Pubkey,
+    pub created_at: i64,
+    pub claimed: bool,
+    pub bump: u8,
 }
 
 // ============================================================================
@@ -200,6 +234,124 @@ pub mod mppsol_cpi {
         Ok(())
     }
 
+    // ----- pay_with_receipt -------------------------------------------
+    //
+    // v0.1.1: Same as pay() but ALSO writes a Receipt PDA. The Receipt
+    // persists across CPIs and tx boundaries, so a later
+    // verify_paid_result_with_receipt can confirm payment-binding
+    // atomically without depending on Solana's per-invocation return-data
+    // clearing. Costs ~0.001 SOL of rent per receipt; reclaim via
+    // claim_receipt.
+    pub fn pay_with_receipt(
+        ctx: Context<PayWithReceipt>,
+        args: PayArgs,
+    ) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(args.expiry >= now, CpiError::DeadlinePassed);
+        require!(args.amount > 0, CpiError::ZeroAmount);
+
+        // Same SPL transfer as Pay.
+        transfer_checked(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                TransferChecked {
+                    from: ctx.accounts.payer_token_account.to_account_info(),
+                    to: ctx.accounts.recipient_token_account.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
+                    authority: ctx.accounts.payer_authority.to_account_info(),
+                },
+            ),
+            args.amount,
+            ctx.accounts.mint.decimals,
+        )?;
+
+        // Populate the Receipt PDA.
+        let slot = Clock::get()?.slot;
+        let receipt = &mut ctx.accounts.receipt;
+        receipt.discriminator = PAY_RETURN_DISCRIMINATOR;
+        receipt.nonce = args.nonce;
+        receipt.request_hash = args.request_hash;
+        receipt.amount = args.amount;
+        receipt.recipient = ctx.accounts.recipient_token_account.key();
+        receipt.mint = ctx.accounts.mint.key();
+        receipt.slot = slot;
+        receipt.payer = ctx.accounts.payer_authority.key();
+        receipt.created_at = now;
+        receipt.claimed = false;
+        receipt.bump = ctx.bumps.receipt;
+
+        msg!(
+            "mppsol/pay+receipt nonce={} request_hash={} amount={}",
+            bs58::encode(args.nonce).into_string(),
+            bs58::encode(args.request_hash).into_string(),
+            args.amount,
+        );
+
+        Ok(())
+    }
+
+    // ----- verify_paid_result_with_receipt ----------------------------
+    //
+    // v0.1.1: Atomic on-chain payment-binding. Validates BOTH the
+    // Ed25519 server signature AND that a Receipt PDA exists for the
+    // (payer, nonce) pair with matching request_hash. Reverts on any
+    // mismatch.
+    //
+    // The Receipt is rent-bearing and persistent — payable in one tx,
+    // verifiable in another, by anyone with read access to the chain.
+    // This is the v0.2 design (per spec/cpi.md §6) shipped early.
+    pub fn verify_paid_result_with_receipt(
+        ctx: Context<VerifyPaidResultWithReceipt>,
+        args: VerifyPaidResultArgs,
+    ) -> Result<()> {
+        // 1. Validate the Receipt PDA matches the supplied nonce/request_hash.
+        let receipt = &ctx.accounts.receipt;
+        require!(receipt.nonce == args.nonce, CpiError::ReceiptMismatch);
+        require!(
+            receipt.request_hash == args.request_hash,
+            CpiError::ReceiptMismatch,
+        );
+        require!(!receipt.claimed, CpiError::ReceiptAlreadyClaimed);
+
+        // 2. Verify Ed25519 server signature on canonical result message.
+        let mut message = Vec::with_capacity(112);
+        message.extend_from_slice(&args.nonce);
+        message.extend_from_slice(&args.request_hash);
+        message.extend_from_slice(&args.result_hash);
+        message.extend_from_slice(&RESULT_DOMAIN_SEP);
+
+        verify_ed25519_precompile_batch(
+            &ctx.accounts.instructions_sysvar,
+            &args.server_pubkey.to_bytes(),
+            &[message],
+            &[args.server_signature],
+        )
+        .map_err(|_| error!(CpiError::InvalidResultSignature))?;
+
+        Ok(())
+    }
+
+    // ----- claim_receipt ----------------------------------------------
+    //
+    // v0.1.1: Payer marks their Receipt as claimed and closes the PDA,
+    // recovering the rent. Required after a Receipt is no longer needed
+    // — receipts otherwise sit on-chain holding rent.
+    //
+    // Claiming is one-way: a claimed Receipt cannot be used by
+    // verify_paid_result_with_receipt (it asserts !claimed). This is
+    // deliberate — once you've consumed the verification, the receipt
+    // is spent.
+    pub fn claim_receipt(ctx: Context<ClaimReceipt>) -> Result<()> {
+        // The Anchor `close = payer` constraint on the receipt account
+        // does the actual close + rent return. We just gate it on the
+        // payer being the original payer recorded in the receipt
+        // (enforced by the seeds + has_one constraint).
+        // Mark claimed = true first as a defensive belt-and-braces
+        // (close happens at end of ix, the field is informational).
+        ctx.accounts.receipt.claimed = true;
+        Ok(())
+    }
+
     // ----- GetReceipt --------------------------------------------------
     //
     // Asserts a return-data receipt for the given nonce exists in this tx
@@ -277,6 +429,76 @@ pub struct Pay<'info> {
     /// CHECK: well-known sysvar address.
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: PayArgs)]
+pub struct PayWithReceipt<'info> {
+    #[account(mut)]
+    pub payer_authority: Signer<'info>,
+
+    #[account(mut)]
+    pub payer_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub recipient_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    pub mint: InterfaceAccount<'info, Mint>,
+
+    /// On-chain receipt PDA. PDA seeds: [RECEIPT_SEED, payer, nonce].
+    #[account(
+        init,
+        payer = payer_authority,
+        space = 8 + Receipt::INIT_SPACE,
+        seeds = [RECEIPT_SEED, payer_authority.key().as_ref(), args.nonce.as_ref()],
+        bump,
+    )]
+    pub receipt: Account<'info, Receipt>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+
+    /// CHECK: well-known sysvar address.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: VerifyPaidResultArgs)]
+pub struct VerifyPaidResultWithReceipt<'info> {
+    /// CHECK: caller (any program or signer requesting verification).
+    pub caller: AccountInfo<'info>,
+
+    /// The original payer of the receipt (used to derive the PDA).
+    /// CHECK: only used to derive the seeds.
+    pub payer: AccountInfo<'info>,
+
+    /// Receipt PDA. Seeds: [RECEIPT_SEED, payer, nonce].
+    #[account(
+        seeds = [RECEIPT_SEED, payer.key().as_ref(), args.nonce.as_ref()],
+        bump = receipt.bump,
+        has_one = payer @ CpiError::ReceiptPayerMismatch,
+    )]
+    pub receipt: Account<'info, Receipt>,
+
+    /// CHECK: well-known sysvar address.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimReceipt<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        close = payer,
+        seeds = [RECEIPT_SEED, payer.key().as_ref(), receipt.nonce.as_ref()],
+        bump = receipt.bump,
+        has_one = payer @ CpiError::ReceiptPayerMismatch,
+    )]
+    pub receipt: Account<'info, Receipt>,
 }
 
 #[derive(Accounts)]

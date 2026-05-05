@@ -201,6 +201,102 @@ describe("mppsol_cpi", () => {
     });
   });
 
+  describe("receipt accounts (v0.1.1 — atomic on-chain payment-binding)", () => {
+    it("pay_with_receipt → verify_paid_result_with_receipt → claim_receipt", async () => {
+      const amount = 1_000_000n;
+      const nonce = randomBytes(32);
+      const requestHash = randomBytes(32);
+      const resultHash = randomBytes(32);
+      const expiry = new BN(Math.floor(Date.now() / 1000) + 60);
+
+      // Derive the receipt PDA.
+      const [receipt] = PublicKey.findProgramAddressSync(
+        [Buffer.from("receipt"), user.publicKey.toBuffer(), nonce],
+        program.programId,
+      );
+
+      // Step 1: pay_with_receipt — pays AND writes the Receipt PDA.
+      const balBefore = (await getAccount(connection, serverAta)).amount;
+      await program.methods
+        .payWithReceipt({
+          amount: new BN(amount.toString()),
+          nonce: Array.from(nonce),
+          requestHash: Array.from(requestHash),
+          expiry,
+        })
+        .accounts({
+          payerAuthority: user.publicKey,
+          payerTokenAccount: userAta,
+          recipientTokenAccount: serverAta,
+          mint,
+          receipt,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .signers([user])
+        .rpc();
+
+      // Token transferred.
+      const balAfter = (await getAccount(connection, serverAta)).amount;
+      expect((balAfter - balBefore).toString()).to.equal(amount.toString());
+
+      // Receipt PDA exists and has the right fields.
+      const receiptAcct = await program.account.receipt.fetch(receipt);
+      expect(receiptAcct.amount.toString()).to.equal(amount.toString());
+      expect(Buffer.from(receiptAcct.nonce).equals(nonce)).to.be.true;
+      expect(Buffer.from(receiptAcct.requestHash).equals(requestHash)).to.be.true;
+      expect(receiptAcct.payer.toBase58()).to.equal(user.publicKey.toBase58());
+      expect(receiptAcct.claimed).to.be.false;
+
+      // Step 2: verify_paid_result_with_receipt — Ed25519 + receipt lookup.
+      // Uses a separate top-level tx (the whole point of receipt accounts —
+      // payment-binding survives across tx boundaries).
+      const serverSigner = generateEd25519();
+      const message = Buffer.concat([nonce, requestHash, resultHash, RESULT_DOMAIN_SEP]);
+      const signature = signDebit(serverSigner.privateKey, message);
+      const precompileIx = buildEd25519PrecompileBatch([
+        {
+          publicKey: serverSigner.publicKey.toBytes(),
+          message,
+          signature,
+        },
+      ]);
+
+      await program.methods
+        .verifyPaidResultWithReceipt({
+          nonce: Array.from(nonce),
+          requestHash: Array.from(requestHash),
+          resultHash: Array.from(resultHash),
+          serverPubkey: serverSigner.publicKey,
+          serverSignature: Array.from(signature),
+        })
+        .accounts({
+          caller: user.publicKey,
+          payer: user.publicKey,
+          receipt,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .preInstructions([precompileIx])
+        .rpc();
+      // Reaching here = verification passed AND the receipt was checked.
+
+      // Step 3: claim_receipt — payer reclaims rent.
+      await program.methods
+        .claimReceipt()
+        .accounts({
+          payer: user.publicKey,
+          receipt,
+        })
+        .signers([user])
+        .rpc();
+
+      // Receipt account is now closed.
+      const receiptAfter = await connection.getAccountInfo(receipt);
+      expect(receiptAfter).to.be.null;
+    });
+  });
+
   describe("settle_via_session", () => {
     it("CPIs into mppsol_session.settle and emits SES1 return data", async () => {
       const TOTAL_CAP = 100_000_000n;
