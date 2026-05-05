@@ -26,6 +26,7 @@ path end-to-end. Audit required before mainnet.
 | --- | --- |
 | `mppsol_session` | [`B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi`](https://explorer.solana.com/address/B7joeuXqPJSCTfUfMacHaWL6eseoDinV7Jxt52gVdfbi?cluster=devnet) |
 | `mppsol_cpi` | [`624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j`](https://explorer.solana.com/address/624xoctSeGzq1TAVwZU1xbM9RozAd3xZmjPeFXrAY14j?cluster=devnet) |
+| `test_consumer` (test-only) | [`65ndFCiYYM3tznTg5Te1x8ALfVP7SxFEwvvUeANYy3Ex`](https://explorer.solana.com/address/65ndFCiYYM3tznTg5Te1x8ALfVP7SxFEwvvUeANYy3Ex?cluster=devnet) |
 
 IDLs are uploaded on-chain — fetch via `Program.fetchIdl(programId, provider)`.
 
@@ -47,13 +48,32 @@ What's implemented in v0.1 source:
 | `mppsol_session::settle` | ✅ Full (Ed25519 precompile batch verify + transfer + state update) |
 | `mppsol_session::close` | ✅ Full (drain escrow → owner_destination, close ATA, close PDA) |
 | `mppsol_cpi::pay` | ✅ Full (transfer + log + return data) |
-| `mppsol_cpi::verify_paid_result` | ✅ Full (return data lookup + Ed25519 result verify) |
-| `mppsol_cpi::get_receipt` | ✅ Full (return data assertion + re-emit) |
-| `mppsol_cpi::settle_via_session` | ⚠️ Stub — CPI wrapper around `mppsol_session::settle`, deferred |
+| `mppsol_cpi::verify_paid_result` | ✅ Full (Ed25519 result-hash verify; v0.1 simplification — see below) |
+| `mppsol_cpi::get_receipt` | ✅ Full (return-data assertion + re-emit, same call stack only) |
+| `mppsol_cpi::settle_via_session` | ✅ Full (CPI to `mppsol_session::settle` + SES1 return data) |
 
-8 of 9 instructions are fully implemented. The remaining stub
-(`settle_via_session`) returns `MissingPrecompile` so callers can't
-accidentally rely on it. Audit required before mainnet deploy.
+All 9 instructions are implemented. Anchor test suite: 7/7 passing on
+localnet. Audit required before mainnet.
+
+#### v0.1 verify_paid_result simplification
+
+The original `cpi.md` spec described `verify_paid_result` as also
+checking that a prior Pay/SettleViaSession set return data with a
+matching nonce. **This doesn't work in Solana**: the runtime clears
+return data at the start of every program invocation (including CPIs),
+so even a parent program calling Pay then verify_paid_result via
+back-to-back CPIs sees empty return data inside verify_paid_result.
+
+For v0.1, `verify_paid_result` only checks the Ed25519 server signature
+on the canonical result message. The on-chain payment-binding guarantee
+is replaced by an off-chain one: **servers only sign result hashes for
+nonces they issued challenges for**, so possession of a valid `(nonce,
+signed_result)` pair implies payment was made off-chain.
+
+**v0.2 plan:** add an optional Receipt account to Pay/SettleViaSession
+so the receipt is rent-bearing, persistent across CPIs, and
+verify_paid_result can look it up by nonce for true on-chain
+payment-binding atomicity. See spec/cpi.md §6 for the design.
 
 ## Architecture
 
