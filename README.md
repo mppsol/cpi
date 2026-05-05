@@ -191,6 +191,12 @@ generated IDL bindings. Once `anchor build` succeeds and IDL JSON is
 emitted, `ts/` will hold `@coral-xyz/anchor`-style instruction builders
 and account decoders. Not present in v0.1.
 
+## Examples
+
+See [`examples/open-session.ts`](./examples/open-session.ts) for a
+runnable script that opens a session on devnet and writes the
+generated authorized-signer key to disk.
+
 ## License
 
 Apache-2.0. Maintained by [psyto](https://github.com/psyto).
