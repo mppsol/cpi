@@ -146,6 +146,214 @@ describe("mppsol_session", () => {
     });
   });
 
+  describe("revoke by server", () => {
+    it("allows the server to revoke (server != owner)", async () => {
+      const sessionId = randomBytes(16);
+      const authorizedSigner = generateEd25519();
+      const [session] = deriveSessionPda(
+        program.programId,
+        owner.publicKey,
+        server.publicKey,
+        sessionId,
+      );
+      const escrow = getAssociatedTokenAddressSync(mint, session, true);
+
+      await program.methods
+        .open({
+          authorizedSigner: authorizedSigner.publicKey,
+          server: server.publicKey,
+          totalCap: new BN(TOTAL_CAP.toString()),
+          expiry: new BN(Math.floor(Date.now() / 1000) + 3600),
+          sessionId: Array.from(sessionId),
+          clusterGenesisHash: Array.from(randomBytes(32)),
+        })
+        .accounts({
+          owner: owner.publicKey,
+          session,
+          mint,
+          escrow,
+          ownerSource: ownerAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+
+      // Server (not owner) revokes.
+      await program.methods
+        .revoke()
+        .accounts({ signer: server.publicKey, session })
+        .signers([server])
+        .rpc();
+
+      const sessionAcct = await program.account.session.fetch(session);
+      expect(sessionAcct.state).to.equal(1);
+    });
+  });
+
+  describe("settle (multi-debit batch)", () => {
+    it("settles a 2-debit batch atomically", async () => {
+      // Ensure server's ATA exists on-chain (outer before only derives the address).
+      const { createAssociatedTokenAccountIdempotent } = await import("@solana/spl-token");
+      await createAssociatedTokenAccountIdempotent(connection, payer, mint, server.publicKey);
+
+      const sessionId = randomBytes(16);
+      const authorizedSigner = generateEd25519();
+      const [session] = deriveSessionPda(
+        program.programId,
+        owner.publicKey,
+        server.publicKey,
+        sessionId,
+      );
+      const escrow = getAssociatedTokenAddressSync(mint, session, true);
+
+      await program.methods
+        .open({
+          authorizedSigner: authorizedSigner.publicKey,
+          server: server.publicKey,
+          totalCap: new BN(TOTAL_CAP.toString()),
+          expiry: new BN(Math.floor(Date.now() / 1000) + 3600),
+          sessionId: Array.from(sessionId),
+          clusterGenesisHash: Array.from(randomBytes(32)),
+        })
+        .accounts({
+          owner: owner.publicKey,
+          session,
+          mint,
+          escrow,
+          ownerSource: ownerAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+
+      const debitExpiry = BigInt(Math.floor(Date.now() / 1000) + 60);
+      // 3+ debits exceed the legacy tx size limit (1232 bytes); use a
+      // versioned tx with ALTs for larger batches in production.
+      const debits = [1n, 2n].map((seq) => {
+        const nonce = randomBytes(32);
+        const amount = seq * 100_000n;
+        const bytes = encodeDebit({ session, nonce, amount, expiry: debitExpiry, sequence: seq });
+        const sig = signDebit(authorizedSigner.privateKey, bytes);
+        return { seq, nonce, amount, bytes, sig };
+      });
+
+      const precompileIx = buildEd25519PrecompileBatch(
+        debits.map((d) => ({
+          publicKey: authorizedSigner.publicKey.toBytes(),
+          message: d.bytes,
+          signature: d.sig,
+        })),
+      );
+
+      const settleIx = await program.methods
+        .settle({
+          debits: debits.map((d) => ({
+            session: Array.from(session.toBuffer()),
+            nonce: Array.from(d.nonce),
+            amount: new BN(d.amount.toString()),
+            expiry: new BN(debitExpiry.toString()),
+            sequence: new BN(d.seq.toString()),
+            domainSep: Array.from(Buffer.from("MPP.SOL/DEBIT001")),
+          })),
+          signatures: debits.map((d) => Array.from(d.sig)),
+        })
+        .accounts({
+          server: server.publicKey,
+          session,
+          mint,
+          escrow,
+          serverTokenAccount: serverAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .instruction();
+
+      const balBefore = (await import("@solana/spl-token")).getAccount;
+      const before = await balBefore(connection, serverAta);
+
+      const tx = new Transaction().add(precompileIx, settleIx);
+      await sendAndConfirmTransaction(connection, tx, [server]);
+
+      const after = await (await import("@solana/spl-token")).getAccount(connection, serverAta);
+      const cumulative = debits.reduce((acc, d) => acc + d.amount, 0n);
+      expect((after.amount - before.amount).toString()).to.equal(cumulative.toString());
+
+      const sessionAcct = await program.account.session.fetch(session);
+      expect(sessionAcct.lastSeenSequence.toString()).to.equal("2");
+    });
+  });
+
+  describe("close", () => {
+    it("drains escrow + closes the session PDA after expiry", async () => {
+      const sessionId = randomBytes(16);
+      const authorizedSigner = generateEd25519();
+      const [session] = deriveSessionPda(
+        program.programId,
+        owner.publicKey,
+        server.publicKey,
+        sessionId,
+      );
+      const escrow = getAssociatedTokenAddressSync(mint, session, true);
+
+      // Open with a near-future expiry so we can wait it out.
+      const expirySecs = 3;
+      await program.methods
+        .open({
+          authorizedSigner: authorizedSigner.publicKey,
+          server: server.publicKey,
+          totalCap: new BN(TOTAL_CAP.toString()),
+          expiry: new BN(Math.floor(Date.now() / 1000) + expirySecs),
+          sessionId: Array.from(sessionId),
+          clusterGenesisHash: Array.from(randomBytes(32)),
+        })
+        .accounts({
+          owner: owner.publicKey,
+          session,
+          mint,
+          escrow,
+          ownerSource: ownerAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([owner])
+        .rpc();
+
+      const ownerBalBefore = (await (await import("@solana/spl-token")).getAccount(connection, ownerAta)).amount;
+
+      // Wait for expiry to pass.
+      await new Promise((r) => setTimeout(r, (expirySecs + 1) * 1000));
+
+      await program.methods
+        .close()
+        .accounts({
+          owner: owner.publicKey,
+          session,
+          mint,
+          escrow,
+          ownerDestination: ownerAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([owner])
+        .rpc();
+
+      // Session PDA should be closed.
+      const sessionAcctRaw = await connection.getAccountInfo(session);
+      expect(sessionAcctRaw).to.be.null;
+
+      // Escrow contents (TOTAL_CAP) should have returned to owner.
+      const ownerBalAfter = (await (await import("@solana/spl-token")).getAccount(connection, ownerAta)).amount;
+      expect((ownerBalAfter - ownerBalBefore).toString()).to.equal(TOTAL_CAP.toString());
+    });
+  });
+
   describe("settle (Ed25519 precompile + transfer)", () => {
     let session: PublicKey;
     let escrow: PublicKey;
@@ -246,6 +454,9 @@ describe("mppsol_session", () => {
         })
         .instruction();
 
+      const { getAccount } = await import("@solana/spl-token");
+      const serverBefore = await getAccount(connection, serverAta);
+
       const tx = new Transaction().add(precompileIx, settleIx);
       await sendAndConfirmTransaction(connection, tx, [server], {
         skipPreflight: false,
@@ -257,9 +468,10 @@ describe("mppsol_session", () => {
         (TOTAL_CAP - debitAmount).toString(),
       );
 
-      const { getAccount } = await import("@solana/spl-token");
-      const serverAcct = await getAccount(connection, serverAta);
-      expect(serverAcct.amount.toString()).to.equal(debitAmount.toString());
+      const serverAfter = await getAccount(connection, serverAta);
+      expect((serverAfter.amount - serverBefore.amount).toString()).to.equal(
+        debitAmount.toString(),
+      );
     });
   });
 });

@@ -11,7 +11,7 @@
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
-use mppsol_cpi::cpi::accounts::{Pay, VerifyPaidResult};
+use mppsol_cpi::cpi::accounts::{GetReceipt, Pay, VerifyPaidResult};
 use mppsol_cpi::program::MppsolCpi;
 use mppsol_cpi::{PayArgs, VerifyPaidResultArgs};
 
@@ -66,6 +66,53 @@ pub mod test_consumer {
 
         Ok(())
     }
+
+    // Performs Pay then GetReceipt in one call stack so the receipt set
+    // by Pay is still readable. Used by anchor tests for get_receipt.
+    pub fn pay_and_get_receipt(
+        ctx: Context<PayAndGetReceipt>,
+        args: PayArgs,
+    ) -> Result<()> {
+        let pay_accounts = Pay {
+            payer_authority: ctx.accounts.payer_authority.to_account_info(),
+            payer_token_account: ctx.accounts.payer_token_account.to_account_info(),
+            recipient_token_account: ctx.accounts.recipient_token_account.to_account_info(),
+            mint: ctx.accounts.mint.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+            instructions_sysvar: ctx.accounts.instructions_sysvar.to_account_info(),
+        };
+        mppsol_cpi::cpi::pay(
+            CpiContext::new(ctx.accounts.mppsol_cpi_program.to_account_info(), pay_accounts),
+            args.clone(),
+        )?;
+
+        let get_receipt_accounts = GetReceipt {
+            caller: ctx.accounts.payer_authority.to_account_info(),
+        };
+        mppsol_cpi::cpi::get_receipt(
+            CpiContext::new(
+                ctx.accounts.mppsol_cpi_program.to_account_info(),
+                get_receipt_accounts,
+            ),
+            args.nonce,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct PayAndGetReceipt<'info> {
+    pub payer_authority: Signer<'info>,
+    #[account(mut)]
+    pub payer_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub recipient_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub mint: InterfaceAccount<'info, Mint>,
+    pub token_program: Interface<'info, TokenInterface>,
+    /// CHECK: well-known sysvar address.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
+    pub mppsol_cpi_program: Program<'info, MppsolCpi>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]

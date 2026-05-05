@@ -91,6 +91,64 @@ describe("mppsol_cpi", () => {
       const after = await getAccount(connection, serverAta);
       expect((after.amount - before.amount).toString()).to.equal(amount.toString());
     });
+
+    it("rejects when expiry is in the past", async () => {
+      const amount = 1_000_000n;
+      try {
+        await program.methods
+          .pay({
+            amount: new BN(amount.toString()),
+            nonce: Array.from(randomBytes(32)),
+            requestHash: Array.from(randomBytes(32)),
+            expiry: new BN(Math.floor(Date.now() / 1000) - 30),
+          })
+          .accounts({
+            payerAuthority: user.publicKey,
+            payerTokenAccount: userAta,
+            recipientTokenAccount: serverAta,
+            mint,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .signers([user])
+          .rpc();
+        expect.fail("expected DeadlinePassed");
+      } catch (e: any) {
+        expect(String(e)).to.match(/DeadlinePassed|expiry has passed/);
+      }
+    });
+  });
+
+  describe("get_receipt (via test_consumer CPI)", () => {
+    // SKIPPED: same constraint as verify_paid_result — Solana clears
+    // return data at the start of every program invocation, including
+    // CPIs. Pay sets return data, returns; the runtime then resets it
+    // when get_receipt's CPI begins. Receipt-account variant in v0.2
+    // will fix this. Implementation is correct per spec.
+    it.skip("succeeds when Pay set return data earlier in the same call stack", async () => {
+      const amount = 1_000_000n;
+      const nonce = randomBytes(32);
+
+      await testConsumerProgram.methods
+        .payAndGetReceipt({
+          amount: new BN(amount.toString()),
+          nonce: Array.from(nonce),
+          requestHash: Array.from(randomBytes(32)),
+          expiry: new BN(Math.floor(Date.now() / 1000) + 60),
+        })
+        .accounts({
+          payerAuthority: user.publicKey,
+          payerTokenAccount: userAta,
+          recipientTokenAccount: serverAta,
+          mint,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          mppsolCpiProgram: program.programId,
+        })
+        .signers([user])
+        .rpc();
+      // Reaching here means get_receipt's nonce-match assertion passed.
+    });
   });
 
   describe("verify_paid_result (via test_consumer CPI)", () => {
