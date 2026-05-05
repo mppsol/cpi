@@ -1,0 +1,35 @@
+{
+  "name": "@mppsol/cpi",
+  "version": "0.1.0-draft.1",
+  "description": "MPP.sol — Solana on-chain programs (mppsol_session + mppsol_cpi). Anchor workspace; TypeScript bindings forthcoming.",
+  "private": false,
+  "files": [
+    "README.md",
+    "LICENSE",
+    "Anchor.toml",
+    "Cargo.toml",
+    "programs/"
+  ],
+  "keywords": [
+    "mpp",
+    "machine-payments-protocol",
+    "solana",
+    "anchor",
+    "spl-token",
+    "x402",
+    "cpi"
+  ],
+  "homepage": "https://mppsol.org",
+  "bugs": {
+    "url": "https://github.com/mppsol/cpi/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mppsol/cpi.git"
+  },
+  "author": "psyto <saito.hiroyuki@gmail.com> (https://github.com/psyto)",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  }
+}

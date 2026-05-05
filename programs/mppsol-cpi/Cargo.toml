@@ -1,0 +1,23 @@
+[package]
+name = "mppsol-cpi"
+version = "0.1.0-draft.1"
+description = "MPP.sol CPI primitive: callable from other Solana programs for atomic pay-and-consume composition"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "mppsol_cpi"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "mppsol-session/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+anchor-spl = "0.30.1"
+mppsol-session = { path = "../mppsol-session", features = ["cpi"] }

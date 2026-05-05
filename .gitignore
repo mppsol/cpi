@@ -1,0 +1,11 @@
+.DS_Store
+target/
+node_modules/
+.anchor/
+test-ledger/
+*.log
+.env
+.env.local
+.idea/
+.vscode/
+Cargo.lock
