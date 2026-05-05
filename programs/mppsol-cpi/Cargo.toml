@@ -20,4 +20,5 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "mppsol-session/id
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = "0.32.1"
+bs58 = "0.5"
 mppsol-session = { path = "../mppsol-session", features = ["cpi"] }
