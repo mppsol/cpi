@@ -123,8 +123,10 @@ describe("mppsol_cpi", () => {
     // SKIPPED: same constraint as verify_paid_result — Solana clears
     // return data at the start of every program invocation, including
     // CPIs. Pay sets return data, returns; the runtime then resets it
-    // when get_receipt's CPI begins. Receipt-account variant in v0.2
-    // will fix this. Implementation is correct per spec.
+    // when get_receipt's CPI begins. The v0.1.1 Receipt-PDA variants
+    // (pay_with_receipt + verify_paid_result_with_receipt) bypass this
+    // limitation — see the dedicated test below. Implementation here is
+    // correct per spec for same-call-stack use.
     it.skip("succeeds when Pay set return data earlier in the same call stack", async () => {
       const amount = 1_000_000n;
       const nonce = randomBytes(32);

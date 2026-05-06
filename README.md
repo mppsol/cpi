@@ -16,9 +16,10 @@ off-chain-signed message verification cheap on-chain.
 
 ## Status
 
-**v0.1 draft. Both programs deployed to Solana devnet.** Anchor test
-suite (5 passing, 1 skipped) validates the critical Ed25519 settle
-path end-to-end. Audit required before mainnet.
+**v0.1.1 draft. Both programs deployed to Solana devnet.** Anchor test
+suite (12 passing) validates the Ed25519 settle path end-to-end plus
+all 7 cpi instructions including the v0.1.1 Receipt-PDA variants.
+Audit required before mainnet.
 
 ### Deployed program IDs (devnet)
 
@@ -73,17 +74,19 @@ is replaced by an off-chain one: **servers only sign result hashes for
 nonces they issued challenges for**, so possession of a valid `(nonce,
 signed_result)` pair implies payment was made off-chain.
 
-**v0.2 plan:** add an optional Receipt account to Pay/SettleViaSession
-so the receipt is rent-bearing, persistent across CPIs, and
-verify_paid_result can look it up by nonce for true on-chain
-payment-binding atomicity. See spec/cpi.md §6 for the design.
+**v0.1.1 (shipped early — was v0.2):** `pay_with_receipt` writes a
+rent-bearing Receipt PDA (keyed by `payer + nonce`) that persists
+across CPIs and tx boundaries. `verify_paid_result_with_receipt` looks
+it up by nonce for true on-chain payment-binding atomicity, and
+`claim_receipt` lets the payer reclaim rent once the receipt is
+consumed. See `spec/cpi.md` §6 for the design.
 
 ## Architecture
 
 ```
                        ┌────────────────────┐
    off-chain signer ──▶│ debit message      │──┐
-                       │ (122 bytes, signed)│  │
+                       │ (104 bytes, signed)│  │
                        └────────────────────┘  │
                                                ▼
 caller program ──CPI──▶ mppsol_cpi ──CPI──▶ mppsol_session
