@@ -1,18 +1,13 @@
 # @mppsol/cpi
 
-Solana on-chain programs for [MPP.sol](https://mppsol.org). This Anchor
-workspace contains two programs deployed together:
+Solana on-chain programs for [MPP.sol](https://mppsol.org) — the cross-VM settlement primitives that receive payment intents originating in EVM contracts (Tempo, Arc, Megaeth) and emit verifiable on-chain Receipt PDAs. This Anchor workspace contains two programs deployed together:
 
 | Program | Role |
 | --- | --- |
-| **`mppsol_session`** | Stateful escrow + off-chain debit settlement. See [`spec/session.md`](https://github.com/mppsol/spec/blob/main/spec/session.md). |
-| **`mppsol_cpi`** | CPI-callable wrappers for atomic pay-and-consume composition from other Solana programs. See [`spec/cpi.md`](https://github.com/mppsol/spec/blob/main/spec/cpi.md). |
+| **`mppsol_session`** | Cross-VM session escrow. EVM-side payer pre-authorizes a Solana-side spending budget; off-chain debits batched and settled on-chain via Ed25519 voucher verification. See [`spec/session.md`](https://github.com/mppsol/spec/blob/main/spec/session.md). |
+| **`mppsol_cpi`** | Atomic settlement primitive. Other Solana programs CPI into it to receive cross-VM payment intents and emit Receipt PDAs that bind the settlement to its EVM origin. See [`spec/cpi.md`](https://github.com/mppsol/spec/blob/main/spec/cpi.md). |
 
-This is the differentiating piece of MPP.sol versus all other MPP
-adapters: **MPP becomes an on-chain composable primitive.** No EVM-based
-MPP adapter (Tempo included) can match it because Solana's atomic
-multi-instruction tx model and Ed25519-precompile pattern make
-off-chain-signed message verification cheap on-chain.
+These programs form the Solana side of mppsol's cross-VM positioning: connect Stripe-grade payments originating in EVM contracts to Solana DeFi via atomic on-chain settlement. See [mppsol.org](https://mppsol.org) for the broader thesis and [soltempo](https://github.com/mppsol/soltempo) for the first concrete consumer.
 
 ## Status
 
@@ -20,6 +15,13 @@ off-chain-signed message verification cheap on-chain.
 suite (12 passing) validates the Ed25519 settle path end-to-end plus
 all 7 cpi instructions including the v0.1.1 Receipt-PDA variants.
 Audit required before mainnet.
+
+**v0.2 (planned):** instruction extensions for receiving cross-VM
+intents from Chainlink CCIP messages — a Tempo Solidity contract emits
+the intent → CCIP delivers it to Solana → these programs verify and
+settle atomically. The current programs already provide the settlement
++ Receipt PDA machinery; v0.2 adds the CCIP message-receipt
+instructions on top. End-to-end demo via [soltempo](https://github.com/mppsol/soltempo).
 
 ### Deployed program IDs (devnet)
 
@@ -144,8 +146,8 @@ anchor build  # ✓ succeeds, produces both .so files
 ## Domain separators
 
 These are bound into Ed25519-signed messages on-chain to prevent
-cross-context signature reuse. They MUST exactly match
-[`@mppsol/core`](https://github.com/mppsol/core)'s constants:
+cross-context signature reuse. They MUST exactly match the canonical
+values defined in [`spec/wire.md`](https://github.com/mppsol/spec/blob/main/spec/wire.md):
 
 | Constant | Bytes |
 | --- | --- |
@@ -192,10 +194,9 @@ mainnet deployment. See
 
 ## TypeScript bindings
 
-The `package.json` here reserves the `@mppsol/cpi` npm scope for the
-generated IDL bindings. Once `anchor build` succeeds and IDL JSON is
-emitted, `ts/` will hold `@coral-xyz/anchor`-style instruction builders
-and account decoders. Not present in v0.1.
+Per the v0.1 strategy decision (on-chain primitives only — no TS SDK at v0.1), no `@mppsol/*` TypeScript bindings ship from this repo. Consumers should fetch the IDL on-chain via `Program.fetchIdl(programId, provider)` and generate their own Anchor-style bindings.
+
+A TS SDK may be added in v0.2 if a second consumer (beyond [soltempo](https://github.com/mppsol/soltempo)) pulls for it. The legacy `@mppsol/core`, `@mppsol/server`, `@mppsol/agent` packages on npm are **deprecated** — see [`mppsol/sdk`](https://github.com/mppsol/sdk).
 
 ## Examples
 
